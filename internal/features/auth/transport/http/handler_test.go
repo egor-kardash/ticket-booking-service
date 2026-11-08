@@ -29,10 +29,12 @@ type fakeUserService struct {
 	registerResult *domain.User
 	registerErr    error
 	registerInput  service.RegisterInput
+	registerCalls  int
 
 	loginResult *service.LoginOutput
 	loginErr    error
 	loginInput  service.LoginInput
+	loginCalls  int
 
 	getMeResult *domain.User
 	getMeErr    error
@@ -40,6 +42,7 @@ type fakeUserService struct {
 }
 
 func (f *fakeUserService) Register(_ context.Context, in service.RegisterInput) (*domain.User, error) {
+	f.registerCalls++
 	f.registerInput = in
 
 	if f.registerErr != nil {
@@ -50,6 +53,7 @@ func (f *fakeUserService) Register(_ context.Context, in service.RegisterInput) 
 }
 
 func (f *fakeUserService) Login(_ context.Context, in service.LoginInput) (*service.LoginOutput, error) {
+	f.loginCalls++
 	f.loginInput = in
 
 	if f.loginErr != nil {
