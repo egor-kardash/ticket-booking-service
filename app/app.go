@@ -9,10 +9,17 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/egor-kardash/ticket-booking-service/internal/config"
+	authpostgres "github.com/egor-kardash/ticket-booking-service/internal/features/auth/repository/postgres"
+	authservice "github.com/egor-kardash/ticket-booking-service/internal/features/auth/service"
+	authhttp "github.com/egor-kardash/ticket-booking-service/internal/features/auth/transport/http"
+	"github.com/egor-kardash/ticket-booking-service/internal/share/hasher"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/httpserver"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/postgres"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/egor-kardash/ticket-booking-service/internal/share/token"
 )
 
 type App struct {
@@ -23,14 +30,37 @@ type App struct {
 }
 
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error) {
+	passwordHasher, err := hasher.New(cfg.Auth.BcryptCost)
+	if err != nil {
+		return nil, fmt.Errorf("init password hasher: %w", err)
+	}
+
 	pool, err := postgres.NewPool(ctx, cfg.Database.DSN())
 	if err != nil {
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
 
-	router := httpserver.NewRouter(log, pool)
+	issuer := token.New(cfg.Auth.JWTSecret, cfg.Auth.TokenDuration)
 
-	server := httpserver.New(cfg.HTTPServer, router, log)
+	userRepo := authpostgres.New(pool)
+	userService := authservice.New(userRepo, passwordHasher, issuer)
+	userHandler := authhttp.New(userService)
+
+	mainRouter := httpserver.NewRouter(log, pool)
+
+	mainRouter.Route("/api/v1", func(router chi.Router) {
+		protected := router.Group(func(protected chi.Router) {
+			protected.Use(httpserver.Auth(issuer))
+		})
+
+		userHandler.Routes(router, protected)
+	})
+
+	server, err := httpserver.New(cfg.HTTPServer, cfg.TLS, mainRouter, log)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("init http server: %w", err)
+	}
 
 	return &App{
 		pool:            pool,
@@ -51,7 +81,11 @@ func (a *App) Run(ctx context.Context) error {
 	serveErr := make(chan error, 1)
 
 	go func() {
-		serveErr <- a.server.Serve(ln)
+		if a.server.TLSConfig != nil {
+			serveErr <- a.server.ServeTLS(ln, "", "")
+		} else {
+			serveErr <- a.server.Serve(ln)
+		}
 	}()
 
 	select {
