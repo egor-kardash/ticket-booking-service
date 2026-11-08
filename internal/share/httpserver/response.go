@@ -17,7 +17,17 @@ func WriteJSON(ctx context.Context, w http.ResponseWriter, status int, payload a
 	writeBody(ctx, w, status, body)
 }
 
+func WriteNoContent(w http.ResponseWriter) {
+	w.Header().Del("Content-Type")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeBody(ctx context.Context, w http.ResponseWriter, status int, body []byte) {
+	if status == http.StatusNoContent {
+		w.WriteHeader(status)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 

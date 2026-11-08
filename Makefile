@@ -5,9 +5,18 @@ COMPOSE := docker compose
 BIN := ./bin/booking
 SSLMODE := $(or $(POSTGRES_SSLMODE),disable)
 
+# Тестовая БД. Имя обязано оканчиваться на _test: тесты откажутся работать
+# с базой, где это не так, чтобы TRUNCATE не задел dev-данные.
+TEST_POSTGRES_HOST ?= 127.0.0.1
+TEST_POSTGRES_PORT ?= 5433
+TEST_POSTGRES_USER ?= $(POSTGRES_USER)
+TEST_POSTGRES_PASSWORD ?= $(POSTGRES_PASSWORD)
+TEST_POSTGRES_DB ?= $(POSTGRES_DB)_test
+TEST_POSTGRES_SSLMODE ?= $(SSLMODE)
+
 .PHONY: help check-env app-build app-run dev dev-down db-up db-down db-reset \
         migrate-create migrate-up migrate-down migrate-action \
-        test lint check pr
+        test test-integration lint fmt fmt-check check pr
 
 help:
 	@echo "app-build          build the binary"
@@ -20,8 +29,11 @@ help:
 	@echo "migrate-up         apply all migrations"
 	@echo "migrate-down       roll back one migration (steps=N for more)"
 	@echo "test               unit tests with -race"
+	@echo "test-integration   integration tests against real PostgreSQL (-race)"
 	@echo "lint               golangci-lint"
-	@echo "check              gofmt + build + vet + test + lint"
+	@echo "fmt                format code (gofmt + import grouping)"
+	@echo "fmt-check          check gofmt and import grouping"
+	@echo "check              fmt-check + build + vet + test + lint"
 	@echo "pr                 push branch and open a PR (TITLE=... DRAFT=1)"
 
 check-env:
@@ -42,7 +54,7 @@ dev-down:
 	@$(COMPOSE) down
 
 db-up: check-env
-	@$(COMPOSE) up -d db
+	@$(COMPOSE) up -d --wait db
 
 db-down:
 	@$(COMPOSE) stop db
@@ -88,16 +100,34 @@ migrate-action: check-env
 test:
 	@go test -race ./...
 
-lint:
-	@golangci-lint run
+test-integration: check-env db-up
+	@$(COMPOSE) exec -T db psql -U $(POSTGRES_USER) -d postgres -tAc \
+		"SELECT 1 FROM pg_database WHERE datname = '$(TEST_POSTGRES_DB)'" | grep -q 1 || \
+		$(COMPOSE) exec -T db createdb -U $(POSTGRES_USER) $(TEST_POSTGRES_DB)
+	@$(COMPOSE) run --rm migrate \
+		-path /migrations \
+		-database "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@db:5432/$(TEST_POSTGRES_DB)?sslmode=$(SSLMODE)" \
+		up
+	@go test -race -shuffle=on -count=1 -tags integration ./...
 
-check:
+lint:
+	@golangci-lint run --build-tags=integration
+
+fmt:
+	@gofmt -w .
+	@golangci-lint fmt
+
+fmt-check:
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "These files are not gofmt'ed:"; \
 		echo "$$unformatted"; \
 		exit 1; \
 	fi
+	@golangci-lint fmt --diff
+
+check:
+	@$(MAKE) fmt-check
 	@go build ./...
 	@go vet ./...
 	@$(MAKE) test

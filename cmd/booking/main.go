@@ -17,6 +17,8 @@ import (
 	"github.com/egor-kardash/ticket-booking-service/internal/share/logger"
 )
 
+const startupTimeout = 3 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -42,7 +44,7 @@ func run() (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	startCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
 
 	a, err := app.New(startCtx, cfg, appLog)

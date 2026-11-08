@@ -2,3 +2,14 @@ version: "2"
 
 linters:
   default: standard
+
+formatters:
+  enable:
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/egor-kardash/ticket-booking-service)
+      custom-order: true
