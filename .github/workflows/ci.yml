@@ -60,3 +60,6 @@ jobs:
         with:
           version: v2.14
           args: --timeout=5m
+
+      - name: Check import grouping
+        run: golangci-lint fmt --diff

@@ -7,7 +7,7 @@ SSLMODE := $(or $(POSTGRES_SSLMODE),disable)
 
 .PHONY: help check-env app-build app-run dev dev-down db-up db-down db-reset \
         migrate-create migrate-up migrate-down migrate-action \
-        test lint check pr
+        test lint fmt fmt-check check pr
 
 help:
 	@echo "app-build          build the binary"
@@ -21,7 +21,9 @@ help:
 	@echo "migrate-down       roll back one migration (steps=N for more)"
 	@echo "test               unit tests with -race"
 	@echo "lint               golangci-lint"
-	@echo "check              gofmt + build + vet + test + lint"
+	@echo "fmt                format code (gofmt + import grouping)"
+	@echo "fmt-check          check gofmt and import grouping"
+	@echo "check              fmt-check + build + vet + test + lint"
 	@echo "pr                 push branch and open a PR (TITLE=... DRAFT=1)"
 
 check-env:
@@ -91,13 +93,21 @@ test:
 lint:
 	@golangci-lint run
 
-check:
+fmt:
+	@gofmt -w .
+	@golangci-lint fmt
+
+fmt-check:
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "These files are not gofmt'ed:"; \
 		echo "$$unformatted"; \
 		exit 1; \
 	fi
+	@golangci-lint fmt --diff
+
+check:
+	@$(MAKE) fmt-check
 	@go build ./...
 	@go vet ./...
 	@$(MAKE) test
