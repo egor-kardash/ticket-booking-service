@@ -1,0 +1,455 @@
+openapi: 3.2.1
+
+info:
+  title: Ticket Booking API
+  version: 0.1.0
+  description: |
+    REST API для бронирования мест на события.
+
+    Базовый путь: `/api/v1`. Аутентификация: `Authorization: Bearer <jwt>`.
+    Тело запросов: JSON, не более 1 MiB, `Content-Type: application/json`.
+    Ошибки: `{"error":{"code":"snake_case","message":"...","fields":{...}}}`.
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: auth
+    description: Регистрация, вход и текущий пользователь
+  - name: health
+    description: Проверки живости и готовности
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: healthz
+      summary: Liveness-проверка
+      description: Процесс жив. БД не используется.
+      security: []
+      responses:
+        '200':
+          description: Процесс жив
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              examples:
+                ok:
+                  value:
+                    status: ok
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: readyz
+      summary: Readiness-проверка
+      description: Проверяет доступность PostgreSQL с таймаутом 2 секунды.
+      security: []
+      responses:
+        '200':
+          description: Сервис готов принимать запросы
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              examples:
+                ready:
+                  value:
+                    status: ready
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      operationId: registerUser
+      summary: Зарегистрировать пользователя
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              register:
+                value:
+                  email: user@example.com
+                  password: correct horse battery staple
+      responses:
+        '201':
+          description: Пользователь создан
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                created:
+                  value:
+                    id: 1
+                    email: user@example.com
+        '400':
+          $ref: '#/components/responses/RegisterBadRequest'
+        '409':
+          $ref: '#/components/responses/EmailTaken'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      operationId: loginUser
+      summary: Войти и получить JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              login:
+                value:
+                  email: user@example.com
+                  password: correct horse battery staple
+      responses:
+        '200':
+          description: Токен выдан
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                authenticated:
+                  value:
+                    access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                    expires_in: 900
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: Получить текущего пользователя
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Текущий пользователь
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                current:
+                  value:
+                    id: 1
+                    email: user@example.com
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Authorization: Bearer <jwt>. Схема сравнения case-insensitive,
+        допускается несколько пробелов между схемой и токеном.
+
+  schemas:
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          x-maxLengthBytes: 254
+          description: >
+            Тримится и приводится к нижнему регистру.
+            В реализации ограничение — 254 байта; JSON Schema считает символы.
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          x-maxLengthBytes: 72
+          description: >
+            Минимум 8 символов. Максимум 72 байта — ограничение bcrypt;
+            JSON Schema считает maxLength в символах, поэтому для не-ASCII
+            паролей фактический лимит строже.
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, email]
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+          format: email
+
+    AuthResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: |
+            JWT для заголовка Authorization: Bearer.
+        expires_in:
+          type: integer
+          format: int64
+          description: Срок жизни токена в секундах.
+
+    HealthStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Машиночитаемый код ошибки.
+            message:
+              type: string
+              description: Человекочитаемое сообщение.
+            fields:
+              type: object
+              additionalProperties:
+                type: string
+              description: Детали валидации по полям; только для validation_failed.
+
+  headers:
+    Location:
+      description: URL созданного ресурса.
+      schema:
+        type: string
+      example: /api/v1/auth/me
+
+    CacheControl:
+      description: Запрет кеширования ответов auth-слоя.
+      schema:
+        type: string
+      example: no-store
+
+    Pragma:
+      description: Совместимость с HTTP/1.0.
+      schema:
+        type: string
+      example: no-cache
+
+    WWWAuthenticate:
+      description: Bearer challenge для 401.
+      schema:
+        type: string
+      examples:
+        missing:
+          value: Bearer
+        invalid:
+          value: 'Bearer error="invalid_token"'
+
+  responses:
+    RegisterBadRequest:
+      description: invalid_json (битый JSON, null, массив, лишние значения) или validation_failed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_json:
+              value:
+                error:
+                  code: invalid_json
+                  message: request body must be a single JSON object
+            validation_failed:
+              value:
+                error:
+                  code: validation_failed
+                  message: request validation failed
+                  fields:
+                    email: must be a valid email
+                    password: must be at least 8 characters
+
+    InvalidJSON:
+      description: Тело не является одним JSON-объектом.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: invalid_json
+              message: request body must be a single JSON object
+
+    EmailTaken:
+      description: Email уже зарегистрирован.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: email_taken
+              message: email is already taken
+
+    InvalidCredentials:
+      description: Неверная пара email/пароль. Одинаковый ответ для неизвестного email и неверного пароля.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: invalid_credentials
+              message: incorrect email or password
+
+    Unauthorized:
+      description: Нет, битый или просроченный JWT.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWWAuthenticate'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: unauthorized
+              message: invalid or expired token
+
+    NotFound:
+      description: Ресурс не найден или недоступен текущему пользователю.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: not_found
+              message: resource not found
+
+    TooLarge:
+      description: Тело запроса больше 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: request_too_large
+              message: request body is too large
+
+    UnsupportedMediaType:
+      description: Content-Type не application/json (или application/*+json).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: unsupported_media_type
+              message: content type must be application/json
+
+    InternalError:
+      description: Внутренняя ошибка. Детали не раскрываются.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: internal_error
+              message: internal server error
+
+    ServiceUnavailable:
+      description: Таймаут операции с БД.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: service_unavailable
+              message: service unavailable
+
+    DatabaseUnavailable:
+      description: Readiness-проверка не смогла достучаться до PostgreSQL.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: database_unavailable
+              message: database is not reachable

@@ -5,6 +5,8 @@ COMPOSE := docker compose
 BIN := ./bin/booking
 SSLMODE := $(or $(POSTGRES_SSLMODE),disable)
 
+REDOCLY_VERSION ?= 2.77.0
+
 # Тестовая БД. Имя обязано оканчиваться на _test: тесты откажутся работать
 # с базой, где это не так, чтобы TRUNCATE не задел dev-данные.
 TEST_POSTGRES_HOST ?= 127.0.0.1
@@ -16,7 +18,7 @@ TEST_POSTGRES_SSLMODE ?= $(SSLMODE)
 
 .PHONY: help check-env app-build app-run dev dev-down db-up db-down db-reset \
         migrate-create migrate-up migrate-down migrate-action \
-        test test-integration lint fmt fmt-check check pr
+        test test-integration lint fmt fmt-check check docs docs-down docs-lint pr
 
 help:
 	@echo "app-build          build the binary"
@@ -34,6 +36,9 @@ help:
 	@echo "fmt                format code (gofmt + import grouping)"
 	@echo "fmt-check          check gofmt and import grouping"
 	@echo "check              fmt-check + build + vet + test + lint"
+	@echo "docs               run OpenAPI UI (Swagger UI, http://localhost:8081)"
+	@echo "docs-down          stop OpenAPI UI"
+	@echo "docs-lint          validate docs/openapi.yml"
 	@echo "pr                 push branch and open a PR (TITLE=... DRAFT=1)"
 
 check-env:
@@ -132,6 +137,20 @@ check:
 	@go vet ./...
 	@$(MAKE) test
 	@$(MAKE) lint
+
+docs:
+	@$(COMPOSE) --profile docs up -d docs
+	@echo "OpenAPI UI: http://localhost:8081"
+
+docs-down:
+	@$(COMPOSE) stop docs
+
+docs-lint:
+	@docker run --rm \
+		-v "$(CURDIR):/work" \
+		-w /work \
+		redocly/cli:$(REDOCLY_VERSION) \
+		lint --config=redocly.yml docs/openapi.yml
 
 pr:
 	@TITLE="$(TITLE)" DRAFT="$(DRAFT)" ./scripts/pushpr.sh
