@@ -26,5 +26,15 @@ services:
       db:
         condition: service_healthy
 
+  docs:
+    image: swaggerapi/swagger-ui:v5.34.1
+    profiles: ["docs"]
+    environment:
+      SWAGGER_JSON: /spec/openapi.yml
+    volumes:
+      - ./docs:/spec:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+
 volumes:
   postgres-data:
