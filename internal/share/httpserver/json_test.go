@@ -75,8 +75,7 @@ func TestDecodeJSON(t *testing.T) {
 			wantErr:     io.EOF,
 		},
 		{
-			// Ревью предполагало, что null принимается. Фактически
-			// RawMessage + проверка '{' отвергают его; фиксируем это поведение.
+			// RawMessage + проверка '{' отвергают null: фиксируем выбранное поведение.
 			name:        "rejects null body",
 			contentType: "application/json",
 			body:        `null`,
