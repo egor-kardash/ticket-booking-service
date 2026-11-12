@@ -18,6 +18,8 @@ tags:
     description: Регистрация, вход и текущий пользователь
   - name: health
     description: Проверки живости и готовности
+  - name: events
+    description: Каталог событий и мест (read-only, без аутентификации)
 
 paths:
   /healthz:
@@ -189,6 +191,153 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: listEvents
+      summary: Список событий
+      description: |
+        Публичный. Сортировка: `starts_at ASC, id ASC`.
+
+        Keyset-пагинация: `limit` и непрозрачный `cursor`. Клиент не должен
+        разбирать содержимое курсора — формат внутренний и может измениться.
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Размер страницы, 1..100. Нечисловое значение или выход за границы
+            даёт `400 invalid_limit`.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Непрозрачный курсор следующей страницы, полученный из `next_cursor`.
+            Отсутствует или пуст — первая страница.
+
+            Внутри base64url(`<unix_micros>:<id>`). Битый курсор или время вне
+            окна 1970-01-01..2100-01-01 даёт `400 invalid_cursor`.
+          schema:
+            type: string
+          example: MTc2NzIyMjAwMDAwMDAwMDoxMg
+      responses:
+        '200':
+          description: Страница событий
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventList'
+              examples:
+                page:
+                  value:
+                    items:
+                      - id: 1
+                        title: Seed Concert
+                        venue: Seed Arena
+                        city: Moscow
+                        starts_at: '2027-01-01T16:00:00Z'
+                    next_cursor: MTc2NzIyMjAwMDAwMDAwMDoxMg
+                last_page:
+                  value:
+                    items: []
+        '400':
+          $ref: '#/components/responses/InvalidPagination'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/events/{id}:
+    get:
+      tags: [events]
+      operationId: getEvent
+      summary: Событие по идентификатору
+      description: Публичный. Отдаёт событие вместе со счётчиками мест.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/EventID'
+      responses:
+        '200':
+          description: Событие
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventDetails'
+              examples:
+                found:
+                  value:
+                    id: 1
+                    title: Seed Concert
+                    venue: Seed Arena
+                    city: Moscow
+                    starts_at: '2027-01-01T16:00:00Z'
+                    seats_total: 100
+                    seats_available: 87
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/events/{id}/seats:
+    get:
+      tags: [events]
+      operationId: listEventSeats
+      summary: Места события
+      description: |
+        Публичный. Пагинации нет: у события около 100 мест, ответ отдаётся целиком.
+
+        Порядок стабилен: `section` и `row` — лексикографически (это строки),
+        `seat` — сначала числовое значение для чисто цифровых меток, затем
+        нецифровые (`A1`, `12A`), затем `id`. Поэтому `2` идёт раньше `10`,
+        а `10` — раньше `A1`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/EventID'
+      responses:
+        '200':
+          description: Все места события
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventSeatList'
+              examples:
+                seats:
+                  value:
+                    items:
+                      - id: 10
+                        section: A
+                        row: '1'
+                        seat: '1'
+                        tier: standard
+                        price_cents: 250000
+                        status: available
+                      - id: 11
+                        section: A
+                        row: '1'
+                        seat: '2'
+                        tier: vip
+                        price_cents: 500000
+                        status: held
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -268,6 +417,127 @@ components:
         status:
           type: string
 
+    EventList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: Всегда массив; пустая страница — `[]`, не `null`.
+          items:
+            $ref: '#/components/schemas/EventListItem'
+        next_cursor:
+          type: string
+          description: |
+            Курсор следующей страницы. Поле отсутствует на последней странице.
+
+    EventListItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, venue, city, starts_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+          maxLength: 200
+        venue:
+          type: string
+          maxLength: 120
+          description: Название площадки.
+        city:
+          type: string
+          maxLength: 120
+        starts_at:
+          type: string
+          format: date-time
+          description: Время начала в UTC, RFC3339.
+
+    EventDetails:
+      type: object
+      additionalProperties: false
+      required: [id, title, venue, city, starts_at, seats_total, seats_available]
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+          maxLength: 200
+        venue:
+          type: string
+          maxLength: 120
+        city:
+          type: string
+          maxLength: 120
+        starts_at:
+          type: string
+          format: date-time
+          description: Время начала в UTC, RFC3339.
+        seats_total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Всего мест у события.
+        seats_available:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Мест в статусе `available`.
+
+    EventSeatList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: Всегда массив; отсутствие мест — `[]`, не `null`.
+          items:
+            $ref: '#/components/schemas/EventSeat'
+
+    EventSeat:
+      type: object
+      additionalProperties: false
+      required: [id, section, row, seat, tier, price_cents, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: |
+            Идентификатор места на событии (`event_seats.id`), а не физического
+            места площадки. Используется в hold/order.
+        section:
+          type: string
+          maxLength: 10
+        row:
+          type: string
+          maxLength: 10
+          description: Метка ряда; строка, а не число.
+        seat:
+          type: string
+          maxLength: 10
+          description: Метка места; строка, а не число.
+        tier:
+          type: string
+          maxLength: 20
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Цена в копейках.
+        status:
+          $ref: '#/components/schemas/EventSeatStatus'
+
+    EventSeatStatus:
+      type: string
+      enum: [available, held, sold]
+      description: |
+        `held` и `sold` для клиента одинаково недоступны, но различаются
+        для отладки.
+
     Error:
       type: object
       additionalProperties: false
@@ -289,6 +559,19 @@ components:
               additionalProperties:
                 type: string
               description: Детали валидации по полям; только для validation_failed.
+
+  parameters:
+    EventID:
+      name: id
+      in: path
+      required: true
+      description: |
+        Идентификатор события. Нечисловое значение или значение ≤ 0 даёт
+        `400 validation_failed` с `fields.id`.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
 
   headers:
     Location:
@@ -453,3 +736,36 @@ components:
             error:
               code: database_unavailable
               message: database is not reachable
+
+    InvalidPagination:
+      description: Некорректные параметры пагинации (`limit` или `cursor`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_limit:
+              value:
+                error:
+                  code: invalid_limit
+                  message: invalid events limit
+            invalid_cursor:
+              value:
+                error:
+                  code: invalid_cursor
+                  message: invalid pagination cursor
+
+    ValidationFailed:
+      description: Неверное значение параметра пути или запроса.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_event_id:
+              value:
+                error:
+                  code: validation_failed
+                  message: request validation failed
+                  fields:
+                    id: must be positive
