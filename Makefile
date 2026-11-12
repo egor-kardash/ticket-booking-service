@@ -17,7 +17,7 @@ TEST_POSTGRES_DB ?= $(POSTGRES_DB)_test
 TEST_POSTGRES_SSLMODE ?= $(SSLMODE)
 
 .PHONY: help check-env app-build app-run dev dev-down db-up db-down db-reset \
-        migrate-create migrate-up migrate-down migrate-action \
+        migrate-create migrate-up migrate-down migrate-action seed \
         test test-integration lint fmt fmt-check check docs docs-down docs-lint pr
 
 help:
@@ -30,6 +30,7 @@ help:
 	@echo "migrate-create     make migrate-create seq=<name>"
 	@echo "migrate-up         apply all migrations"
 	@echo "migrate-down       roll back one migration (steps=N for more)"
+	@echo "seed               seed local DB (1 venue, 2 events, 100 seats each)"
 	@echo "test               unit tests with -race"
 	@echo "test-integration   integration tests against real PostgreSQL (-race)"
 	@echo "lint               golangci-lint"
@@ -101,6 +102,10 @@ migrate-action: check-env
 		-path /migrations \
 		-database "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@db:5432/$(POSTGRES_DB)?sslmode=$(SSLMODE)" \
 		"$(action)" $(if $(steps),$(steps))
+
+seed: db-up migrate-up
+	@$(COMPOSE) exec -T db psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) \
+		< scripts/seed.sql
 
 test:
 	@go test -race ./...

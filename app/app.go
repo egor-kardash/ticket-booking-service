@@ -16,6 +16,9 @@ import (
 	authpostgres "github.com/egor-kardash/ticket-booking-service/internal/features/auth/repository/postgres"
 	authservice "github.com/egor-kardash/ticket-booking-service/internal/features/auth/service"
 	authhttp "github.com/egor-kardash/ticket-booking-service/internal/features/auth/transport/http"
+	eventspostgres "github.com/egor-kardash/ticket-booking-service/internal/features/events/repository/postgres"
+	eventsservice "github.com/egor-kardash/ticket-booking-service/internal/features/events/service"
+	eventshttp "github.com/egor-kardash/ticket-booking-service/internal/features/events/transport/http"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/hasher"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/httpserver"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/postgres"
@@ -67,6 +70,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) (chi.Ro
 	userService := authservice.New(userRepo, passwordHasher, issuer)
 	userHandler := authhttp.New(userService)
 
+	eventRepo := eventspostgres.New(pool)
+	eventService := eventsservice.New(eventRepo)
+	eventHandler := eventshttp.New(eventService)
+
 	router := httpserver.NewRouter(log, pool)
 
 	router.Route("/api/v1", func(router chi.Router) {
@@ -75,6 +82,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) (chi.Ro
 		})
 
 		userHandler.Routes(router, protected)
+		eventHandler.Routes(router)
 	})
 
 	return router, nil
