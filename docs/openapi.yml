@@ -20,6 +20,8 @@ tags:
     description: Проверки живости и готовности
   - name: events
     description: Каталог событий и мест (read-only, без аутентификации)
+  - name: holds
+    description: Резерв места на ограниченное время (JWT, только свои резервы)
 
 paths:
   /healthz:
@@ -338,6 +340,150 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /api/v1/holds:
+    post:
+      tags: [holds]
+      operationId: createHold
+      summary: Зарезервировать место
+      description: |
+        JWT. Создаёт резерв на 10 минут. Время истечения задаёт сервер
+        (`now() + 10 минут`), клиент его не передаёт.
+
+        `price_cents` в ответе — текущая цена места, а не снимок: снимок
+        фиксируется при создании заказа. Повторный запрос на занятое место
+        не идемпотентен и возвращает `409 seat_taken`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateHoldRequest'
+            examples:
+              create:
+                value:
+                  event_seat_id: 10
+      responses:
+        '201':
+          description: Резерв создан
+          headers:
+            Location:
+              description: URL созданного резерва.
+              schema:
+                type: string
+              example: /api/v1/holds/42
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+              examples:
+                created:
+                  value:
+                    id: 42
+                    event_seat_id: 10
+                    expires_at: '2026-11-14T12:10:00Z'
+                    price_cents: 500000
+        '400':
+          $ref: '#/components/responses/HoldBadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          $ref: '#/components/responses/SeatTaken'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/holds/{id}:
+    get:
+      tags: [holds]
+      operationId: getHold
+      summary: Получить свой резерв
+      description: |
+        JWT. Только свой hold. Чужой, несуществующий или истёкший hold
+        (`expires_at` в прошлом) → `404 not_found`. Ответ не зависит от того,
+        успел ли фоновый воркер перевести резерв в `expired`.
+
+        `price_cents` — текущая цена места; снимок цены фиксируется в заказе.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/HoldID'
+      responses:
+        '200':
+          description: Резерв
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Pragma:
+              $ref: '#/components/headers/Pragma'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+              examples:
+                found:
+                  value:
+                    id: 42
+                    event_seat_id: 10
+                    expires_at: '2026-11-14T12:10:00Z'
+                    price_cents: 500000
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+    delete:
+      tags: [holds]
+      operationId: deleteHold
+      summary: Отменить резерв
+      description: |
+        JWT. Только свой hold. Переводит резерв в `canceled` и освобождает
+        место, если на нём нет других активных hold'ов.
+
+        Повторный вызов, чужой или истёкший hold → `404 not_found`. Тела
+        ответа нет, `Content-Type` не выставляется.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/HoldID'
+      responses:
+        '204':
+          description: Резерв отменён
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -538,6 +684,45 @@ components:
         `held` и `sold` для клиента одинаково недоступны, но различаются
         для отладки.
 
+    CreateHoldRequest:
+      type: object
+      additionalProperties: false
+      required: [event_seat_id]
+      properties:
+        event_seat_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Идентификатор места на событии (`event_seats.id`), а не физического
+            места площадки.
+
+    Hold:
+      type: object
+      additionalProperties: false
+      required: [id, event_seat_id, expires_at, price_cents]
+      properties:
+        id:
+          type: integer
+          format: int64
+        event_seat_id:
+          type: integer
+          format: int64
+          description: Идентификатор зарезервированного места на событии.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Время истечения резерва в UTC, RFC3339. Задаёт сервер
+            (`now() + TTL`), клиент это значение не передаёт.
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Текущая цена места в копейках на момент запроса. Это не снимок:
+            снимок цены фиксируется при создании заказа.
+
     Error:
       type: object
       additionalProperties: false
@@ -573,6 +758,18 @@ components:
         format: int64
         minimum: 1
 
+    HoldID:
+      name: id
+      in: path
+      required: true
+      description: |
+        Идентификатор резерва. Нечисловое значение или значение ≤ 0 даёт
+        `400 validation_failed` с `fields.id`.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
   headers:
     Location:
       description: URL созданного ресурса.
@@ -581,7 +778,7 @@ components:
       example: /api/v1/auth/me
 
     CacheControl:
-      description: Запрет кеширования ответов auth-слоя.
+      description: Запрет кеширования персональных ответов (auth и holds).
       schema:
         type: string
       example: no-store
@@ -623,6 +820,28 @@ components:
                   fields:
                     email: must be a valid email
                     password: must be at least 8 characters
+
+    HoldBadRequest:
+      description: |
+        `invalid_json` (битый JSON, не объект, лишние поля) либо
+        `validation_failed` с `fields.event_seat_id`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_json:
+              value:
+                error:
+                  code: invalid_json
+                  message: request body must be a single JSON object
+            validation_failed:
+              value:
+                error:
+                  code: validation_failed
+                  message: request validation failed
+                  fields:
+                    event_seat_id: must be positive
 
     InvalidJSON:
       description: Тело не является одним JSON-объектом.
@@ -762,10 +981,46 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           examples:
-            invalid_event_id:
+            invalid_id:
               value:
                 error:
                   code: validation_failed
                   message: request validation failed
                   fields:
                     id: must be positive
+
+    SeatTaken:
+      description: Место уже занято другим активным hold'ом или продано.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: seat_taken
+              message: seat is already held
+
+    MethodNotAllowed:
+      description: |
+        HTTP-метод не поддерживается для ресурса. Ответ содержит заголовок
+        `Allow` со списком поддерживаемых методов.
+      headers:
+        Allow:
+          description: Список поддерживаемых методов; зависит от ресурса.
+          schema:
+            type: string
+          examples:
+            collection:
+              summary: 'PUT /api/v1/holds'
+              value: 'POST'
+            item:
+              summary: 'PUT /api/v1/holds/{id}'
+              value: 'GET, DELETE'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: method_not_allowed
+              message: method not allowed

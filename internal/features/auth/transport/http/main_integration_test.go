@@ -95,7 +95,11 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 		TokenDuration: integrationTTL,
 	}}
 
-	router, err := app.NewRouter(cfg, testPool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	router, _, err := app.NewRouter(
+		cfg,
+		testPool,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
 	if err != nil {
 		t.Fatalf("build router: %v", err)
 	}

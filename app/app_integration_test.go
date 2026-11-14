@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/egor-kardash/ticket-booking-service/app"
@@ -66,7 +67,36 @@ func testAppConfig(t *testing.T) *config.Config {
 	}
 }
 
+// acquireTestDatabaseLock защищает от гонки с другими интеграционными пакетами:
+// Run сразу запускает expiry worker, который пишет в booking.holds.
+func acquireTestDatabaseLock(t *testing.T) {
+	t.Helper()
+
+	cfg, err := testdb.ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("test database config: %v", err)
+	}
+
+	pool, err := pgxpool.New(context.Background(), cfg.DSN(cfg.Database))
+	if err != nil {
+		t.Fatalf("create lock pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if err := testdb.RequireDatabase(context.Background(), pool); err != nil {
+		t.Fatalf("require test database: %v", err)
+	}
+
+	release, err := testdb.AcquireLock(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("acquire test database lock: %v", err)
+	}
+	t.Cleanup(release)
+}
+
 func TestAppGracefulShutdown(t *testing.T) {
+	acquireTestDatabaseLock(t)
+
 	logs := &logSink{messages: make(chan string, 16)}
 	logger := slog.New(logs)
 
