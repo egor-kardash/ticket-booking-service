@@ -52,18 +52,28 @@ func newEventsEnv(t *testing.T) *eventsEnv {
 	}
 	t.Cleanup(release)
 
-	router, err := app.NewRouter(testAppConfig(t), pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("app.NewRouter() error = %v", err)
-	}
-
-	server := httptest.NewServer(router)
+	server := httptest.NewServer(newTestRouter(t, pool))
 	t.Cleanup(server.Close)
 
 	client := server.Client()
 	client.Timeout = 10 * time.Second
 
 	return &eventsEnv{server: server, client: client, pool: pool}
+}
+
+func newTestRouter(t *testing.T, pool *pgxpool.Pool) http.Handler {
+	t.Helper()
+
+	router, _, err := app.NewRouter(
+		testAppConfig(t),
+		pool,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("app.NewRouter() error = %v", err)
+	}
+
+	return router
 }
 
 func resetEventTables(t *testing.T, pool *pgxpool.Pool) {
@@ -466,12 +476,7 @@ func TestEventsInternalErrorHasNoInternalDetails(t *testing.T) {
 	}
 	pool.Close()
 
-	router, err := app.NewRouter(testAppConfig(t), pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("app.NewRouter() error = %v", err)
-	}
-
-	server := httptest.NewServer(router)
+	server := httptest.NewServer(newTestRouter(t, pool))
 	t.Cleanup(server.Close)
 
 	client := server.Client()

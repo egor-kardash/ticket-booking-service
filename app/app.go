@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,16 +20,25 @@ import (
 	eventspostgres "github.com/egor-kardash/ticket-booking-service/internal/features/events/repository/postgres"
 	eventsservice "github.com/egor-kardash/ticket-booking-service/internal/features/events/service"
 	eventshttp "github.com/egor-kardash/ticket-booking-service/internal/features/events/transport/http"
+	holdspostgres "github.com/egor-kardash/ticket-booking-service/internal/features/holds/repository/postgres"
+	holdsservice "github.com/egor-kardash/ticket-booking-service/internal/features/holds/service"
+	holdshttp "github.com/egor-kardash/ticket-booking-service/internal/features/holds/transport/http"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/hasher"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/httpserver"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/postgres"
 	"github.com/egor-kardash/ticket-booking-service/internal/share/token"
 )
 
+const (
+	expireInterval = 30 * time.Second
+	expireTimeout  = 5 * time.Second
+)
+
 type App struct {
 	pool            *pgxpool.Pool
 	log             *slog.Logger
 	server          *http.Server
+	holds           *holdsservice.Service
 	shutdownTimeout time.Duration
 }
 
@@ -38,7 +48,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
 
-	router, err := NewRouter(cfg, pool, log)
+	router, holdsService, err := NewRouter(cfg, pool, log)
 	if err != nil {
 		pool.Close()
 		return nil, err
@@ -54,14 +64,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		pool:            pool,
 		log:             log,
 		server:          server,
+		holds:           holdsService,
 		shutdownTimeout: cfg.HTTPServer.ShutdownTimeout,
 	}, nil
 }
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) (chi.Router, error) {
+func NewRouter(
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	log *slog.Logger,
+) (chi.Router, *holdsservice.Service, error) {
 	passwordHasher, err := hasher.New(cfg.Auth.BcryptCost)
 	if err != nil {
-		return nil, fmt.Errorf("init password hasher: %w", err)
+		return nil, nil, fmt.Errorf("init password hasher: %w", err)
 	}
 
 	issuer := token.New(cfg.Auth.JWTSecret, cfg.Auth.TokenDuration)
@@ -74,6 +89,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) (chi.Ro
 	eventService := eventsservice.New(eventRepo)
 	eventHandler := eventshttp.New(eventService)
 
+	holdsRepo := holdspostgres.New(pool)
+	holdsService := holdsservice.New(holdsRepo)
+	holdsHandler := holdshttp.New(holdsService)
+
 	router := httpserver.NewRouter(log, pool)
 
 	router.Route("/api/v1", func(router chi.Router) {
@@ -83,12 +102,27 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) (chi.Ro
 
 		userHandler.Routes(router, protected)
 		eventHandler.Routes(router)
+		holdsHandler.Routes(protected)
 	})
 
-	return router, nil
+	return router, holdsService, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
+	expireCtx, stopExpirer := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		a.runExpirer(expireCtx)
+	}()
+
+	defer func() {
+		stopExpirer()
+		wg.Wait()
+	}()
+
 	ln, err := net.Listen("tcp", a.server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", a.server.Addr, err)
@@ -130,4 +164,34 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) Close() error {
 	a.pool.Close()
 	return nil
+}
+
+func (a *App) runExpirer(ctx context.Context) {
+	a.expireHoldsOnce(ctx)
+
+	ticker := time.NewTicker(expireInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.expireHoldsOnce(ctx)
+		}
+	}
+}
+
+func (a *App) expireHoldsOnce(ctx context.Context) {
+	iterCtx, cancel := context.WithTimeout(ctx, expireTimeout)
+	defer cancel()
+
+	n, err := a.holds.ExpireHolds(iterCtx)
+
+	switch {
+	case err != nil && !errors.Is(err, context.Canceled):
+		a.log.Error("expire holds", "error", err)
+	case n > 0:
+		a.log.Info("holds expired", "count", n)
+	}
 }
