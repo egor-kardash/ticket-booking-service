@@ -128,15 +128,18 @@ func insertTestSeat(t *testing.T, pool *pgxpool.Pool, venueID int64, section, ro
 	return id
 }
 
-func insertTestEventSeat(t *testing.T, pool *pgxpool.Pool, eventID, seatID, venueID, priceCents int64, status domain.EventSeatStatus) {
+func insertTestEventSeat(t *testing.T, pool *pgxpool.Pool, eventID, seatID, venueID, priceCents int64, status domain.EventSeatStatus) int64 {
 	t.Helper()
 
-	if _, err := pool.Exec(context.Background(),
+	var id int64
+	if err := pool.QueryRow(context.Background(),
 		`INSERT INTO booking.event_seats (event_id, seat_id, venue_id, tier, price_cents, status)
-		 VALUES ($1, $2, $3, 'standard', $4, $5)`,
-		eventID, seatID, venueID, priceCents, string(status)); err != nil {
+		 VALUES ($1, $2, $3, 'standard', $4, $5) RETURNING id`,
+		eventID, seatID, venueID, priceCents, string(status)).Scan(&id); err != nil {
 		t.Fatalf("insert event seat: %v", err)
 	}
+
+	return id
 }
 
 type httpResult struct {

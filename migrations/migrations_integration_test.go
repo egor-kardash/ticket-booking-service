@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -30,6 +31,8 @@ const (
 	authDownFile   = "000002_auth.down.sql"
 	eventsUpFile   = "000003_events.up.sql"
 	eventsDownFile = "000003_events.down.sql"
+	holdsUpFile    = "000004_holds.up.sql"
+	holdsDownFile  = "000004_holds.down.sql"
 
 	checkViolationSQLState      = "23514"
 	uniqueViolationSQLState     = "23505"
@@ -458,6 +461,173 @@ func markEventSeatStatus(t *testing.T, status string, limit, offset int) []int64
 	}
 
 	return ids
+}
+
+func applyHoldsSchema(t *testing.T) {
+	t.Helper()
+
+	applyFile(t, initUpFile)
+	applyFile(t, authUpFile)
+	applyFile(t, eventsUpFile)
+	applyFile(t, holdsUpFile)
+}
+
+func indexDefinition(t *testing.T, name string) string {
+	t.Helper()
+
+	var definition string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT indexdef
+		FROM pg_indexes
+		WHERE schemaname = 'booking' AND tablename = 'holds' AND indexname = $1`, name).
+		Scan(&definition); err != nil {
+		t.Fatalf("read index %q: %v", name, err)
+	}
+
+	return definition
+}
+
+func TestMigrationsHoldsUp(t *testing.T) {
+	resetSchema(t)
+	applyHoldsSchema(t)
+
+	if !tableExists(t, "booking.holds") {
+		t.Fatal("table booking.holds does not exist")
+	}
+
+	userID := insertUser(t, "holds@example.com")
+	now := time.Now()
+
+	t.Run("indexes", func(t *testing.T) {
+		active := indexDefinition(t, "holds_active_seat_idx")
+		if !strings.Contains(active, "CREATE UNIQUE INDEX") ||
+			!strings.Contains(active, "event_seat_id") ||
+			!strings.Contains(active, "status = 'active'") {
+			t.Errorf("holds_active_seat_idx = %q, want unique partial index on active holds", active)
+		}
+
+		expires := indexDefinition(t, "holds_expires_idx")
+		if !strings.Contains(expires, "expires_at") || !strings.Contains(expires, "status = 'active'") {
+			t.Errorf("holds_expires_idx = %q, want partial index on expires_at", expires)
+		}
+	})
+
+	t.Run("one active hold per seat", func(t *testing.T) {
+		eventSeatID := createHoldEventSeat(t)
+
+		if err := insertHold(t, userID, eventSeatID, "active", now, now.Add(10*time.Minute)); err != nil {
+			t.Fatalf("first active hold: %v", err)
+		}
+
+		err := insertHold(t, userID, eventSeatID, "active", now, now.Add(10*time.Minute))
+		requirePgError(t, err, uniqueViolationSQLState)
+	})
+
+	t.Run("active and expired hold can coexist", func(t *testing.T) {
+		eventSeatID := createHoldEventSeat(t)
+
+		if err := insertHold(t, userID, eventSeatID, "active", now, now.Add(10*time.Minute)); err != nil {
+			t.Fatalf("active hold: %v", err)
+		}
+		if err := insertHold(t, userID, eventSeatID, "expired", now.Add(-time.Hour), now.Add(-time.Second)); err != nil {
+			t.Fatalf("expired hold: %v", err)
+		}
+	})
+
+	t.Run("status check", func(t *testing.T) {
+		err := insertHold(t, userID, createHoldEventSeat(t), "pending", now, now.Add(10*time.Minute))
+		requirePgError(t, err, checkViolationSQLState)
+	})
+
+	t.Run("expires after created check", func(t *testing.T) {
+		err := insertHold(t, userID, createHoldEventSeat(t), "active", now, now.Add(-time.Second))
+		requirePgError(t, err, checkViolationSQLState)
+	})
+
+	t.Run("user foreign key", func(t *testing.T) {
+		err := insertHold(t, 999999, createHoldEventSeat(t), "active", now, now.Add(10*time.Minute))
+		requirePgError(t, err, foreignKeyViolationSQLState)
+	})
+
+	t.Run("event seat foreign key", func(t *testing.T) {
+		err := insertHold(t, userID, 999999, "active", now, now.Add(10*time.Minute))
+		requirePgError(t, err, foreignKeyViolationSQLState)
+	})
+}
+
+func TestMigrationsHoldsDown(t *testing.T) {
+	resetSchema(t)
+	applyHoldsSchema(t)
+
+	applyFile(t, holdsDownFile)
+
+	if tableExists(t, "booking.holds") {
+		t.Error("after 000004 down table booking.holds still exists")
+	}
+	if !tableExists(t, "booking.event_seats") {
+		t.Error("after 000004 down table booking.event_seats disappeared")
+	}
+}
+
+func TestMigrationsHoldsUpAfterDown(t *testing.T) {
+	resetSchema(t)
+	applyHoldsSchema(t)
+	applyFile(t, holdsDownFile)
+	applyFile(t, holdsUpFile)
+
+	if !tableExists(t, "booking.holds") {
+		t.Fatal("after up -> down -> up table booking.holds does not exist")
+	}
+	for _, index := range []string{"holds_active_seat_idx", "holds_expires_idx"} {
+		indexDefinition(t, index)
+	}
+}
+
+func insertUser(t *testing.T, email string) int64 {
+	t.Helper()
+
+	var id int64
+	if err := testPool.QueryRow(context.Background(),
+		`INSERT INTO booking.users (email, password_hash) VALUES ($1, 'hash') RETURNING id`, email).
+		Scan(&id); err != nil {
+		t.Fatalf("insert user %q: %v", email, err)
+	}
+
+	return id
+}
+
+func createHoldEventSeat(t *testing.T) int64 {
+	t.Helper()
+
+	venueID := insertVenue(t, "Holds Venue")
+	eventID := insertEvent(t, venueID, "Holds Event")
+	seatID := insertSeat(t, venueID, "A")
+
+	var eventSeatID int64
+	if err := testPool.QueryRow(context.Background(),
+		`INSERT INTO booking.event_seats (event_id, seat_id, venue_id, tier, price_cents)
+		 VALUES ($1, $2, $3, 'standard', 1000) RETURNING id`,
+		eventID, seatID, venueID).Scan(&eventSeatID); err != nil {
+		t.Fatalf("insert event seat for hold: %v", err)
+	}
+
+	return eventSeatID
+}
+
+func insertHold(
+	t *testing.T,
+	userID, eventSeatID int64,
+	status string,
+	createdAt, expiresAt time.Time,
+) error {
+	t.Helper()
+
+	_, err := testPool.Exec(context.Background(), `
+		INSERT INTO booking.holds (user_id, event_seat_id, status, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		userID, eventSeatID, status, createdAt, expiresAt)
+
+	return err
 }
 
 func insertVenue(t *testing.T, name string) int64 {
